@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.Executor;
 import java.util.function.Function;
 import java.util.function.IntFunction;
 import java.util.function.IntPredicate;
@@ -21,6 +22,8 @@ import java.util.function.Supplier;
 import org.hibernate.reactive.logging.impl.Log;
 import org.hibernate.reactive.logging.impl.LogCategory;
 import org.hibernate.reactive.logging.impl.LoggerFactory;
+
+import io.vertx.core.impl.ContextInternal;
 
 import static org.hibernate.reactive.util.async.impl.AsyncIterator.fromIterator;
 import static org.hibernate.reactive.util.async.impl.AsyncIterator.range;
@@ -175,7 +178,20 @@ public class  CompletionStages {
 	 * }</pre>
 	 */
 	public static <T> CompletionStage<Void> loop(T[] array, Function<T, CompletionStage<?>> consumer) {
-		return loop( 0, array.length, index -> consumer.apply( array[index] ) );
+		CompletionStage<?> res = voidFuture();
+		for ( int i = 0; i < array.length; i++ ) {
+			int step = i;
+			if ( step == 0 || ( step & 0xff ) != 0 ) {
+				res = res.thenCompose( ignore -> consumer.apply( array[step] ) );
+			}
+			else {
+				// Protect from stack overflow errors
+				ContextInternal context = ContextInternal.current();
+				Executor executor = command -> context.runOnContext( v -> command.run() );
+				res = res.thenComposeAsync( ignore -> consumer.apply( array[step] ), executor );
+			}
+		}
+		return res.thenCompose( CompletionStages::voidFuture );
 	}
 
 	/**
@@ -189,7 +205,24 @@ public class  CompletionStages {
 	 * }</pre>
 	 */
 	public static <T> CompletionStage<Void> loop(T[] array, IntPredicate filter, IntFunction<CompletionStage<?>> consumer) {
-		return loop( 0, array.length, filter, consumer );
+		CompletionStage<?> res = voidFuture();
+		int count = 0;
+		for ( int i = 0; i < array.length; i++ ) {
+			if ( !filter.test( i ) ) {
+				continue;
+			}
+			int step = count++;
+			if ( step == 0 || ( step & 0xff ) != 0 ) {
+				res = res.thenCompose( ignore -> consumer.apply( step ) );
+			}
+			else {
+				// Protect from stack overflow errors
+				ContextInternal context = ContextInternal.current();
+				Executor executor = command -> context.runOnContext( v -> command.run() );
+				res = res.thenComposeAsync( ignore -> consumer.apply( step ), executor );
+			}
+		}
+		return res.thenCompose( CompletionStages::voidFuture );
 	}
 
 	/**
@@ -386,7 +419,20 @@ public class  CompletionStages {
 	 * }</pre>
 	 */
 	public static CompletionStage<Void> loop(int start, int end, IntFunction<CompletionStage<?>> consumer) {
-		return loop( start, end, CompletionStages::alwaysTrue, consumer );
+		CompletionStage<?> res = voidFuture();
+		for ( int i = start; i < end; i++ ) {
+			int step = i;
+			if ( step == 0 || ( step & 0xff ) != 0 ) {
+				res = res.thenCompose( ignore -> consumer.apply( step ) );
+			}
+			else {
+				// Protect from stack overflow errors
+				ContextInternal context = ContextInternal.current();
+				Executor executor = command -> context.runOnContext( v -> command.run() );
+				res = res.thenComposeAsync( ignore -> consumer.apply( step ), executor );
+			}
+		}
+		return res.thenCompose( CompletionStages::voidFuture );
 	}
 
 	public static <T> CompletionStage<Void> whileLoop(T[] array, Function<T, CompletionStage<Boolean>> consumer) {
@@ -421,7 +467,24 @@ public class  CompletionStages {
 	}
 
 	public static CompletionStage<Void> whileLoop(Supplier<CompletionStage<Boolean>> loopSupplier) {
-		return asyncWhile( loopSupplier::get );
+		return whileLoopInternal( 0, loopSupplier ).thenCompose( CompletionStages::voidFuture );
+	}
+
+	private static CompletionStage<Boolean> whileLoopInternal(int i, Supplier<CompletionStage<Boolean>> loopSupplier) {
+		Function<Boolean, CompletionStage<Boolean>> func = shouldContinue -> {
+			if ( shouldContinue ) {
+				return whileLoopInternal( i + 1, loopSupplier );
+			}
+			return FALSE;
+		};
+		CompletionStage<Boolean> res = loopSupplier.get();
+		if ( i == 0 || ( i & 0xff ) != 0 ) {
+			return res.thenCompose( func );
+		}
+		// Protect from stack overflow errors
+		ContextInternal context = ContextInternal.current();
+		Executor executor = command -> context.runOnContext( v -> command.run() );
+		return res.thenComposeAsync( func, executor );
 	}
 
 	public static CompletionStage<Void> whileLoop(Supplier<Boolean> whileCondition, Supplier<CompletionStage<?>> loopSupplier) {
