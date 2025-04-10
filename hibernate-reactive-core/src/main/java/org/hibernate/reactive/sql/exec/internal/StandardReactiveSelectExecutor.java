@@ -247,11 +247,48 @@ public class StandardReactiveSelectExecutor implements ReactiveSelectExecutor {
 		final SessionFactoryImplementor factory = session.getFactory();
 		final boolean queryCacheEnabled = factory.getSessionFactoryOptions().isQueryCacheEnabled();
 
+		ReactiveValuesMappingProducer mappingProducer = (ReactiveValuesMappingProducer) jdbcSelect.getJdbcValuesMappingProducer();
+
+		if ( !queryCacheEnabled ) {
+			// Fast path
+			return mappingProducer.reactiveResolve( resultSetAccess, session.getLoadQueryInfluencers(), factory )
+					.thenApply( jdbcValuesMapping -> new ReactiveValuesResultSet(
+							resultSetAccess,
+							null,
+							queryIdentifier,
+							executionContext.getQueryOptions(),
+							jdbcValuesMapping,
+							null,
+							executionContext
+					) );
+		}
+
+		return resolveJdbcValuesSourceSlowPath(
+				queryIdentifier,
+				jdbcSelect,
+				canBeCached,
+				executionContext,
+				resultSetAccess,
+				factory,
+				session,
+				mappingProducer
+		);
+	}
+
+	private CompletionStage<ReactiveValuesResultSet> resolveJdbcValuesSourceSlowPath(
+			String queryIdentifier,
+			JdbcOperationQuerySelect jdbcSelect,
+			boolean canBeCached,
+			ExecutionContext executionContext,
+			ReactiveResultSetAccess resultSetAccess,
+			SessionFactoryImplementor factory,
+			SharedSessionContractImplementor session,
+			ReactiveValuesMappingProducer mappingProducer) {
+
 		final List<?> cachedResults;
 		final CacheMode cacheMode = JdbcExecHelper.resolveCacheMode( executionContext );
-		final boolean cacheable = queryCacheEnabled
-				&& canBeCached
-				&& executionContext.getQueryOptions().isResultCachingEnabled() == Boolean.TRUE;
+		final boolean cacheable = canBeCached && executionContext.getQueryOptions()
+				.isResultCachingEnabled() == Boolean.TRUE;
 		final QueryKey queryResultsCacheKey;
 
 		if ( cacheable && cacheMode.isGetEnabled() ) {
@@ -268,7 +305,12 @@ public class StandardReactiveSelectExecutor implements ReactiveSelectExecutor {
 					.getQueryResultsCache( executionContext.getQueryOptions().getResultCacheRegionName() );
 
 			queryResultsCacheKey = QueryKey
-					.from( jdbcSelect.getSqlString(), executionContext.getQueryOptions().getLimit(), executionContext.getQueryParameterBindings(), session );
+					.from(
+							jdbcSelect.getSqlString(),
+							executionContext.getQueryOptions().getLimit(),
+							executionContext.getQueryParameterBindings(),
+							session
+					);
 
 			cachedResults = queryCache.get(
 					// todo (6.0) : QueryCache#get takes the `queryResultsCacheKey` see tat discussion above
@@ -298,7 +340,10 @@ public class StandardReactiveSelectExecutor implements ReactiveSelectExecutor {
 		}
 		else {
 			SqlExecLogger.SQL_EXEC_LOGGER
-					.debugf( "Skipping reading Query result cache data: cache-enabled = %s, cache-mode = %s", queryCacheEnabled, cacheMode.name() );
+					.debugf(
+							"Skipping reading Query result cache data: cache-enabled = %s, cache-mode = %s",
+							true, cacheMode.name()
+					);
 			cachedResults = null;
 			if ( cacheable && cacheMode.isPutEnabled() ) {
 				queryResultsCacheKey = QueryKey.from(
@@ -313,12 +358,19 @@ public class StandardReactiveSelectExecutor implements ReactiveSelectExecutor {
 			}
 		}
 
-		ReactiveValuesMappingProducer mappingProducer = (ReactiveValuesMappingProducer) jdbcSelect.getJdbcValuesMappingProducer();
 		if ( cachedResults == null ) {
 			if ( queryResultsCacheKey == null ) {
 				return mappingProducer
 						.reactiveResolve( resultSetAccess, session.getLoadQueryInfluencers(), factory )
-						.thenApply( jdbcValuesMapping -> new ReactiveValuesResultSet( resultSetAccess, null, queryIdentifier, executionContext.getQueryOptions(), jdbcValuesMapping, null, executionContext ) );
+						.thenApply( jdbcValuesMapping -> new ReactiveValuesResultSet(
+								resultSetAccess,
+								null,
+								queryIdentifier,
+								executionContext.getQueryOptions(),
+								jdbcValuesMapping,
+								null,
+								executionContext
+						) );
 			}
 			else {
 				// If we need to put the values into the cache, we need to be able to capture the JdbcValuesMetadata
@@ -326,7 +378,15 @@ public class StandardReactiveSelectExecutor implements ReactiveSelectExecutor {
 				JdbcValuesMetadata metadataForCache = capturingMetadata.resolveMetadataForCache();
 				return mappingProducer
 						.reactiveResolve( resultSetAccess, session.getLoadQueryInfluencers(), factory )
-						.thenApply( jdbcValuesMapping -> new ReactiveValuesResultSet( resultSetAccess, queryResultsCacheKey, queryIdentifier, executionContext.getQueryOptions(), jdbcValuesMapping, metadataForCache, executionContext ) );
+						.thenApply( jdbcValuesMapping -> new ReactiveValuesResultSet(
+								resultSetAccess,
+								queryResultsCacheKey,
+								queryIdentifier,
+								executionContext.getQueryOptions(),
+								jdbcValuesMapping,
+								metadataForCache,
+								executionContext
+						) );
 			}
 		}
 		else {
@@ -337,7 +397,10 @@ public class StandardReactiveSelectExecutor implements ReactiveSelectExecutor {
 				stage = mappingProducer.reactiveResolve( resultSetAccess, session.getLoadQueryInfluencers(), factory );
 			}
 			else {
-				stage = mappingProducer.reactiveResolve( (JdbcValuesMetadata) cachedResults.get( 0 ), session.getLoadQueryInfluencers(), factory );
+				stage = mappingProducer.reactiveResolve(
+						(JdbcValuesMetadata) cachedResults.get( 0 ), session.getLoadQueryInfluencers(),
+						factory
+				);
 			}
 			return stage.thenApply( jdbcValuesMapping -> new ReactiveValuesResultSet(
 					resultSetAccess,
