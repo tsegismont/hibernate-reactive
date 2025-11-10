@@ -5,6 +5,8 @@
  */
 package org.hibernate.reactive.pool.impl;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.List;
@@ -31,7 +33,6 @@ import io.vertx.sqlclient.SqlConnection;
 import io.vertx.sqlclient.Tuple;
 import io.vertx.sqlclient.spi.DatabaseMetadata;
 
-import static org.hibernate.reactive.util.impl.CompletionStages.completedFuture;
 import static org.hibernate.reactive.util.impl.CompletionStages.rethrow;
 import static org.hibernate.reactive.util.impl.CompletionStages.voidFuture;
 
@@ -246,9 +247,22 @@ public abstract class SqlClientPool implements ReactiveConnectionPool {
 	}
 
 	private static class ProxyConnection implements ReactiveConnection {
+
+		private static final VarHandle OPENED_HANDLE;
+
+		static {
+			try {
+				MethodHandles.Lookup lookup = MethodHandles.lookup();
+				OPENED_HANDLE = lookup.findVarHandle( ProxyConnection.class, "opened", boolean.class );
+			}
+			catch (ReflectiveOperationException e) {
+				throw new ExceptionInInitializerError( e );
+			}
+		}
+
 		private final Supplier<CompletionStage<ReactiveConnection>> connectionSupplier;
-		private Integer batchSize;
-		private ReactiveConnection connection;
+		private final CompletableFuture<ReactiveConnection> connectionFuture = new CompletableFuture<>();
+		private volatile boolean opened = false;
 
 		public ProxyConnection(Supplier<CompletionStage<ReactiveConnection>> connectionSupplier) {
 			this.connectionSupplier = connectionSupplier;
@@ -257,29 +271,35 @@ public abstract class SqlClientPool implements ReactiveConnectionPool {
 		/**
 		 * @return the existing {@link ReactiveConnection}, or open a new one
 		 */
-		CompletionStage<ReactiveConnection> connection() {
-			if ( connection == null ) {
-				return connectionSupplier.get()
-						.thenApply( conn -> {
-							if ( batchSize != null ) {
-								conn.withBatchSize( batchSize );
-							}
-							connection = conn;
-							return connection;
-						} );
+		private CompletionStage<ReactiveConnection> connection() {
+			if ( opened ) {
+				return connectionFuture;
 			}
-			return completedFuture( connection );
+			if ( OPENED_HANDLE.compareAndSet( this, false, true ) ) {
+				connectionSupplier.get().whenComplete( (connection, throwable) -> {
+					if ( throwable != null ) {
+						connectionFuture.completeExceptionally( throwable );
+					}
+					else {
+						connectionFuture.complete( connection );
+					}
+				} );
+			}
+			return connectionFuture;
 		}
 
 		@Override
 		public boolean isTransactionInProgress() {
-			return connection != null && connection.isTransactionInProgress();
+			ReactiveConnection reactiveConnection = connectionFuture.getNow( null );
+			return reactiveConnection != null && reactiveConnection.isTransactionInProgress();
 		}
 
 		@Override
 		public DatabaseMetadata getDatabaseMetadata() {
-			Objects.requireNonNull( connection, "Database metadata not available until the connection is opened" );
-			return connection.getDatabaseMetadata();
+			return Objects.requireNonNull(
+					connectionFuture.getNow( null ),
+					"Database metadata not available until the connection is opened"
+			).getDatabaseMetadata();
 		}
 
 		@Override
@@ -388,13 +408,8 @@ public abstract class SqlClientPool implements ReactiveConnectionPool {
 		}
 
 		@Override
-		public ReactiveConnection withBatchSize(int batchSize) {
-			if ( connection == null ) {
-				this.batchSize = batchSize;
-			}
-			else {
-				connection = connection.withBatchSize( batchSize );
-			}
+		public ProxyConnection withBatchSize(int batchSize) {
+			connectionFuture.thenApply( reactiveConnection -> reactiveConnection.withBatchSize( batchSize ) );
 			return this;
 		}
 
@@ -405,8 +420,8 @@ public abstract class SqlClientPool implements ReactiveConnectionPool {
 
 		@Override
 		public CompletionStage<Void> close() {
-			return connection != null
-					? connection.close().thenAccept( v -> connection = null )
+			return opened
+					? connectionFuture.getNow( null ).close()
 					: voidFuture();
 		}
 	}
