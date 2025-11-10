@@ -24,6 +24,7 @@ import org.hibernate.reactive.pool.BatchingConnection;
 import org.hibernate.reactive.pool.ReactiveConnection;
 import org.hibernate.reactive.util.impl.CompletionStages;
 
+import io.vertx.core.internal.ContextInternal;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 import io.vertx.sqlclient.DatabaseException;
@@ -59,9 +60,20 @@ public class SqlClientConnection implements ReactiveConnection {
 
 	private final Pool pool;
 	private final SqlConnection connection;
+	private final ContextInternal creationContext;
+	private final Exception creationTrace;
 	private Transaction transaction;
 
-	SqlClientConnection(SqlConnection connection, Pool pool, SqlStatementLogger sqlStatementLogger, SqlExceptionHelper sqlExceptionHelper) {
+	SqlClientConnection(
+			SqlConnection connection,
+			Pool pool,
+			SqlStatementLogger sqlStatementLogger,
+			SqlExceptionHelper sqlExceptionHelper,
+			ContextInternal creationContext,
+			Exception creationTrace) {
+		this.creationContext = creationContext;
+		this.creationTrace = creationTrace;
+		LOG.warn( "Creating Hibernate SqlClientConnection " + this + " on context " + creationContext );
 		this.pool = pool;
 		this.sqlStatementLogger = sqlStatementLogger;
 		this.connection = connection;
@@ -338,6 +350,13 @@ public class SqlClientConnection implements ReactiveConnection {
 	}
 
 	private void feedback(String sql) {
+		ContextInternal currentContext = ContextInternal.current();
+		if ( !currentContext.equals( creationContext ) ) {
+			LOG.warn(
+					"Expected to use connection " + this + " on context " + creationContext + " but was " + currentContext,
+					creationTrace
+			);
+		}
 		Objects.requireNonNull( sql, "SQL query cannot be null" );
 		// DDL already gets formatted by the client, so don't reformat it
 		FormatStyle formatStyle = sqlStatementLogger.isFormat() && !sql.contains( System.lineSeparator() )

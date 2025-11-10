@@ -22,6 +22,7 @@ import org.hibernate.reactive.pool.ReactiveConnection;
 import org.hibernate.reactive.pool.ReactiveConnectionPool;
 
 import io.vertx.core.Future;
+import io.vertx.core.internal.ContextInternal;
 import io.vertx.sqlclient.DatabaseException;
 import io.vertx.sqlclient.Pool;
 import io.vertx.sqlclient.Row;
@@ -123,12 +124,29 @@ public abstract class SqlClientPool implements ReactiveConnectionPool {
 	}
 
 	private CompletionStage<ReactiveConnection> getConnectionFromPool(Pool pool) {
-		return completionStage( pool.getConnection().map( this::newConnection ), ReactiveConnection::close );
+		Exception creationTrace = new Exception();
+		ContextInternal creationContext = ContextInternal.current();
+		return completionStage(
+				pool.getConnection()
+						.map( connection -> newConnection(
+								connection,
+								creationContext,
+								creationTrace
+						) ), ReactiveConnection::close
+		);
 	}
 
 	private CompletionStage<ReactiveConnection> getConnectionFromPool(Pool pool, SqlExceptionHelper sqlExceptionHelper) {
+		Exception creationTrace = new Exception();
+		ContextInternal creationContext = ContextInternal.current();
 		return completionStage(
-				pool.getConnection().map( sqlConnection -> newConnection( sqlConnection, sqlExceptionHelper ) ),
+				pool.getConnection()
+						.map( sqlConnection -> newConnection(
+								sqlConnection,
+								sqlExceptionHelper,
+								creationContext,
+								creationTrace
+						) ),
 				ReactiveConnection::close
 		);
 	}
@@ -205,12 +223,26 @@ public abstract class SqlClientPool implements ReactiveConnectionPool {
 		return completableFuture;
 	}
 
-	private SqlClientConnection newConnection(SqlConnection connection) {
-		return newConnection( connection, getSqlExceptionHelper() );
+	private SqlClientConnection newConnection(
+			SqlConnection connection,
+			ContextInternal creationContext,
+			Exception creationTrace) {
+		return newConnection( connection, getSqlExceptionHelper(), creationContext, creationTrace );
 	}
 
-	private SqlClientConnection newConnection(SqlConnection connection, SqlExceptionHelper sqlExceptionHelper) {
-		return new SqlClientConnection( connection, getPool(), getSqlStatementLogger(), sqlExceptionHelper );
+	private SqlClientConnection newConnection(
+			SqlConnection connection,
+			SqlExceptionHelper sqlExceptionHelper,
+			ContextInternal creationContext,
+			Exception creationTrace) {
+		return new SqlClientConnection(
+				connection,
+				getPool(),
+				getSqlStatementLogger(),
+				sqlExceptionHelper,
+				creationContext,
+				creationTrace
+		);
 	}
 
 	private static class ProxyConnection implements ReactiveConnection {
