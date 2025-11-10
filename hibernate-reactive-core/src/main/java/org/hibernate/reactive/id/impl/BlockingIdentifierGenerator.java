@@ -14,6 +14,7 @@ import org.hibernate.reactive.session.ReactiveConnectionSupplier;
 
 import io.vertx.core.Context;
 import io.vertx.core.Vertx;
+import io.vertx.core.internal.ContextInternal;
 import io.vertx.core.internal.pool.CombinerExecutor;
 import io.vertx.core.internal.pool.Executor;
 import io.vertx.core.internal.pool.Task;
@@ -124,8 +125,10 @@ public abstract class BlockingIdentifierGenerator implements ReactiveIdentifierG
 
 		private final ReactiveConnectionSupplier connectionSupplier;
 		private final CompletableFuture<Long> result;
+		private final ContextInternal creationContext;
 
 		public GenerateIdAction(ReactiveConnectionSupplier connectionSupplier, CompletableFuture<Long> result) {
+			creationContext = ContextInternal.current();
 			this.connectionSupplier = Objects.requireNonNull( connectionSupplier );
 			this.result = Objects.requireNonNull( result );
 		}
@@ -140,22 +143,28 @@ public abstract class BlockingIdentifierGenerator implements ReactiveIdentifierG
 				completedFuture( local ).whenComplete( this::acceptAsReturnValue );
 			}
 			else {
-				nextHiValue( connectionSupplier )
-						.whenComplete( (newlyGeneratedHi, throwable) -> {
-							if ( throwable != null ) {
-								result.completeExceptionally( throwable );
-							}
-							else {
-								//We ignore the state argument as we actually use the field directly
-								//for convenience, but they are the same object.
-								executor.submit( stateIgnored -> {
-									result.complete( next( newlyGeneratedHi ) );
-									return null;
-								} );
-							}
-						} );
+				creationContext.runOnContext( v -> {
+					generateNewHiValue();
+				} );
 			}
 			return null;
+		}
+
+		private void generateNewHiValue() {
+			nextHiValue( connectionSupplier )
+					.whenComplete( (newlyGeneratedHi, throwable) -> {
+						if ( throwable != null ) {
+							result.completeExceptionally( throwable );
+						}
+						else {
+							//We ignore the state argument as we actually use the field directly
+							//for convenience, but they are the same object.
+							executor.submit( stateIgnored -> {
+								result.complete( next( newlyGeneratedHi ) );
+								return null;
+							} );
+						}
+					} );
 		}
 
 		private void acceptAsReturnValue(final Long aLong, final Throwable throwable) {
